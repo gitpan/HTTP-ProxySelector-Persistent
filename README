@@ -1,0 +1,174 @@
+NAME
+    HTTP::ProxySelector::Persistent - Locally cache and use a list of proxy
+    servers for high volume, proxied LWP::UserAgent transactions
+
+VERSION
+    Version 0.01
+
+SYNOPSIS
+    This module is a fork from HTTP::ProxySelector (written by Eyal Udassin)
+    that is modified to:
+
+    * Require less trips to look up proxy lists by caching them locally
+    (bandwidth economy and speed).
+    * Almost always set your useragent to a valid proxy (reliability).
+    * Ensure that you never retry a failed proxy in a subsequent proxy
+    selection call (minimum # of timeouts possible).
+    * Leave the cache of proxy servers in place after execution for the next
+    call to use (persistence).
+
+      use HTTP::ProxySelector;
+      use LWP::UserAgent;
+
+      # Instantiate
+      my $selector = HTTP::ProxySelector::Persistent->new();
+      my $ua = LWP::UserAgent->new();
+
+      # Assign a _ proxy to the UserAgent object.
+      $selector->set_proxy($ua);
+  
+      # Just in case you need to know the chosen proxy
+      print 'Selected proxy: ',$selector->get_proxy(),"\n";
+
+PREREQUISITES
+    HTTP::ProxySelector::Persistent requires you to have these perl modules
+    installed:
+
+    * BerkeleyDB
+    * LWP::UserAgent
+    * Date::Manip
+
+PUBLIC METHODS
+  new()
+    new is the constructor for HTTP::ProxySelector::Persistent objects.
+
+    Returns a new HTTP::ProxySelector::Persistent object.
+
+    Accepts a key-value list of options as arguments. The option keys are:
+
+   db_file
+    The full path and filename for the proxy cache database file. You must
+    have permission to write in this directory. This option is mandatory, it
+    has no default!
+
+   Example :
+      $select = HTTP::ProxySelector::Persistent->new( db_file => "/tmp/proxy_cache.bdb" );
+
+   sites
+    Reference to a list of sites containing the proxy lists.
+
+   Example :
+      $select = HTTP::ProxySelector::Persistent->new( sites => ['http://www.proxylist.com/list.htm'] );
+
+   Default:
+      [ 'http://www.multiproxy.org/txt_anon/proxy.txt', 'http://www.samair.ru/proxy/fresh-proxy-list.htm' ]
+
+   update_interval
+    How often to update the cached list of proxy servers. Must be readable
+    by Date::Manip.
+
+   Example:
+      $select = HTTP::ProxySelector::Persistent->new( update_interval => "20 minutes" );
+
+   Default
+      "15 minutes"
+
+   testsite
+    Destination site to test the proxy with.
+
+   Example :
+      $select = HTTP::ProxySelector::Persistent->new( testsite => 'http://yahoo.com' );
+
+   Default
+      http://www.google.com 
+
+  set_proxy()
+    Chooses a proxy at random from the cache database and sets it as the
+    proxy for a LWP::UserAgent. Automatically tests the proxy. If the proxy
+    fails the test, it removes the proxy from the cache and chooses another
+    one until it finds a working proxy. If necessary, this sub will try
+    every proxy in the cache database.
+
+    Arguments: A LWP::Useragent object
+
+    Returns: 0 normally, or an error message if it fails
+
+   Example:
+      $select->set_proxy( $ua );
+
+  get_proxy()
+    Arguments: none.
+
+    Returns: a scalar string containing the address of the selected proxy.
+
+   Example:
+      $proxy_address = $select->get_proxy();
+
+  test_proxy()
+    Tests the proxy by trying to access a site (specified using the
+    "testsite" option when constructing an HTTP::ProxySelector::Persistent
+    object).
+
+    Arguments: an LWP::UserAgent object.
+
+    Returns: 0 for success, 1 for failure.
+
+PRIVATE FUNCTIONS
+  _fetch_proxies()
+    Retrieves the proxy lists, extracts the proxy servers and caches them
+    locally in a BerkeleyDB. This sub assumes that the cache database file
+    does not exist. If this function were called before the cache database
+    file were deleted, you would have duplicate entries in the cache and a
+    bunch of old, potentially inoperative proxies stored in the cache. You
+    should never have to call this method yourself. The new() method of the
+    HTTP::ProxySelector::Persistent object uses this sub when the proxy
+    cache database is either expired, malformed, empty or missing.
+
+   Arguments: none.
+   Returns:
+    0 upon success, or an error message string upon failure.
+
+TODO
+    * Code beautification. 1st draft is always rough.
+
+AUTHOR
+    Michael Trowbridge, "<michael.a.trowbridge at gmail.com>"
+
+BUGS
+    Please report any bugs or feature requests to
+    "bug-http-proxyselector-persistent at rt.cpan.org", or through the web
+    interface at
+    <http://rt.cpan.org/NoAuth/ReportBug.html?Queue=HTTP-ProxySelector-Persi
+    stent>. I will be notified, and then you'll automatically be notified of
+    progress on your bug as I make changes.
+
+SUPPORT
+    You can find documentation for this module with the perldoc command.
+
+        perldoc HTTP::ProxySelector::Persistent
+
+    You can also look for information at:
+
+    * AnnoCPAN: Annotated CPAN documentation
+        <http://annocpan.org/dist/HTTP-ProxySelector-Persistent>
+
+    * CPAN Ratings
+        <http://cpanratings.perl.org/d/HTTP-ProxySelector-Persistent>
+
+    * RT: CPAN's request tracker
+        <http://rt.cpan.org/NoAuth/Bugs.html?Dist=HTTP-ProxySelector-Persist
+        ent>
+
+    * Search CPAN
+        <http://search.cpan.org/dist/HTTP-ProxySelector-Persistent>
+
+ACKNOWLEDGEMENTS
+    This module is a fork from HTTP::ProxySelector v0.02.
+    HTTP::ProxySelector v0.02 is copyright 2003 Eyal Udassin.
+
+COPYRIGHT & LICENSE
+    Copyright 2007 Michael Trowbridge, all rights reserved.
+
+    This program is free software; you can redistribute it and/or modify it
+    under the same terms as Perl itself.
+
