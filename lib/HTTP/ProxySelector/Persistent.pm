@@ -17,11 +17,11 @@ HTTP::ProxySelector::Persistent - Locally cache and use a list of proxy servers 
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 =head1 SYNOPSIS
 
@@ -43,14 +43,17 @@ This module is a fork from HTTP::ProxySelector (written by Eyal Udassin) that is
   use LWP::UserAgent;
 
   # Instantiate
-  my $selector = HTTP::ProxySelector::Persistent->new();
+  my $selector = HTTP::ProxySelector::Persistent->new( db_file => "/tmp/proxy_cache.bdb" );
   my $ua = LWP::UserAgent->new();
 
   # Assign a _ proxy to the UserAgent object.
-  $selector->set_proxy($ua);
+  $selector->set_proxy($ua) or die $selector->error();
   
   # Just in case you need to know the chosen proxy
   print 'Selected proxy: ',$selector->get_proxy(),"\n";
+
+  # Perform a quick proxied get.  Lets you skip the useragent stuff.
+  my $html = $selector->proxied_get( url => "http://www.google.com" ) or die $selector->error();
 
 =head1 PREREQUISITES
 
@@ -94,7 +97,7 @@ Reference to a list of sites containing the proxy lists.
 
 =head4 Default:
 
-  [ 'http://www.multiproxy.org/txt_anon/proxy.txt', 'http://www.samair.ru/proxy/fresh-proxy-list.htm' ]
+  [ 'http://hidemyass.com/free_proxy_lists.php?sort=DESC&country=1&limit=100' ]
 
 =head3 update_interval
 
@@ -102,7 +105,8 @@ How often to update the cached list of proxy servers.  Must be readable by Date:
 
 =head4 Example: 
 
-  $select = HTTP::ProxySelector::Persistent->new( update_interval => "20 minutes" );
+  $select = HTTP::ProxySelector::Persistent->new( update_interval => "20 minutes" )
+	    or die "Couldn't create proxyselector!";
 
 =head4 Default
 
@@ -136,7 +140,7 @@ sub new {
   }
   # Defaults
   unless ($self->{options}{sites}) {
-    @{$self->{options}{sites}} = ('http://www.multiproxy.org/txt_anon/proxy.txt','http://www.samair.ru/proxy/fresh-proxy-list.htm');
+    @{$self->{options}{sites}} = ('http://hidemyass.com/free_proxy_lists.php?sort=DESC&country=1&limit=100');
   }
   $self->{options}{testsite}	    ||= 'http://www.google.com';
   $self->{options}{update_interval} ||= "15 minutes";
@@ -148,7 +152,7 @@ sub new {
     tie %h, "BerkeleyDB::Hash",
                 -Filename => $self->{options}{db_file},
                 -Flags    => DB_CREATE
-        or return "Cannot open file $self->{options}{db_file}: $! $BerkeleyDB::Error\n" ;
+        or die "Cannot open file $self->{options}{db_file}: $! $BerkeleyDB::Error\n" ;
     if ( exists $h{"date"} ) { # cache file contains a date stamp
       if ( Date_Cmp( $h{"date"}, DateCalc( "today", "-" . $self->{options}{update_interval} ) ) < 0 ) { 
 	# It's too old, fetch new data
@@ -159,7 +163,7 @@ sub new {
       }
       else { # The cache is good and current enough to be used
 	untie %h;
-	$status = 0;
+	$status = 1;
       }
     }
     else { # cache database file exists, but is malformed, let's rebuild it
@@ -171,7 +175,7 @@ sub new {
   else {  # If it doesn't exist, create and populate it
     $status = $self->_fetch_proxies();
   }
-  ( $status eq '0' ) ? return $self : return $status;  
+  ( $status ) ? return $self : return $status;  
 }
 
 =head2 set_proxy()
@@ -180,11 +184,11 @@ Chooses a proxy at random from the cache database and sets it as the proxy for a
 
 Arguments: A LWP::Useragent object
 
-Returns:  0 normally, or an error message if it fails
+Returns:  1 (success) or undef upon failure (sets an error).
 
 =head3 Example:
 
-  $select->set_proxy( $ua );
+  $select->set_proxy( $ua ) or die $select->error();
 
 =cut
 
@@ -192,7 +196,8 @@ Returns:  0 normally, or an error message if it fails
 sub set_proxy {
   my ($self, $ua) = @_;
   # Open the cache database
-  tie %h, "BerkeleyDB::Hash", -Filename => $self->{options}{db_file}, or return "Cannot open file $self->{options}{db_file}: $! $BerkeleyDB::Error\n" ;
+  tie %h, "BerkeleyDB::Hash", -Filename => $self->{options}{db_file}, 
+    or $self->error( "Cannot open file $self->{options}{db_file}: $! $BerkeleyDB::Error" ) and return undef ;
   my $proxytest = 0;
   do {
     # Select a random proxy from the cache
@@ -204,16 +209,16 @@ sub set_proxy {
     # Test the proxy
     $proxytest = $self->test_proxy( $ua );
     # Delete the proxy if it failed the test
-    delete $h{ $proxy } unless ( $proxytest == 0 );
-  } until ( ( $proxytest == 0 ) || ( scalar( keys( %h ) ) <= 1 ) );
+    delete $h{ $proxy } unless ( $proxytest );
+  } until ( $proxytest || ( scalar( keys( %h ) ) <= 1 ) );
   untie %h;
-  if ( $proxytest == 0 ) {
-    return 0;
+  if ( $proxytest ) {
+    return 1;
   }
   else {
     # delete the proxy file to force the next new() call to create a new cache
     unlink $self->{options}{db_file};
-    return 'All proxies were bad';
+    $self->error( 'All proxies were bad' ) and return undef;
   }
 }
 
@@ -237,18 +242,116 @@ sub get_proxy {
 
 =head2 test_proxy()
 
-Tests the proxy by trying to access a site (specified using the "testsite" option when constructing an HTTP::ProxySelector::Persistent object).
+Tests the proxy by trying to access a site (specified using the "testsite" option when constructing an HTTP::ProxySelector::Persistent object).  It temporarily sets the timeout to be 1/2 of the timeout set in the useragent that's passed to it.  If the useragent that's passed doesn't have a timeout set, it defaults to 5 seconds.
 
 Arguments:  an LWP::UserAgent object.
 
-Returns:  0 for success, 1 for failure.
+Returns:  1 for success or undef for failure (sets an error).
+
+Example: 
+
+  ( $select->test_proxy( $ua ) ) ? print "Good test\n" : die $select->error();
 
 =cut
 
 sub test_proxy {
   my ($self, $ua) = @_;
+  my ( $original_timeout, $test_timeout ) = ( $ua->timeout(), int( $ua->timeout() / 2 ) );
+  $test_timeout = 5 if ( $original_timeout == 180 ); 
+  $test_timeout = 1 if ( $test_timeout == 0 ); # prevent 0 second timeouts
+
+  $ua->timeout( $test_timeout );
   my $response = $ua->get($self->{options}{testsite});
-  $response->is_success() ? return 0 : return 1;
+  $ua->timeout( $original_timeout );
+  
+  return 1 if ( $response->is_success() );  # successful exit
+  
+  # Error out
+  $response->is_error() ? $self->error( $response->error_as_HTML() ) : $self->error( "Unknown error while testing proxy" );
+  return undef;
+}
+
+=head2 proxied_get()
+
+Selects a proxy and attempts to download the URL passed to this function as an argument.  If the download fails, it will remove the proxy from the cache, select another one, and retry until the download succeeds.  When it does succeed, this function returns the content of the response.  If all you need to do is download one webpage one time, this should take about half as long as manually setting a useragent and then using that useragent to do a second grab after the automatic proxy test.
+
+If all you're doing is a single HTTP get in your script and that's it, this is a faster way to do it.  Setting the useragent proxy involves at least one mandatory test before the module even gives you a proxy to make your real get with.  This way uses your actual HTTP get instead of testing first.  It just persistently attempts to make your get and doesn't quit until it either runs out of proxies or succeeds in the HTTP get.
+
+Each call to this method chooses a new proxy server from the cache.  Using two calls to proxied_get() in the same script will most likely use two completely different proxy servers.
+
+=head3 Arguments are options in a single hash with these keys:
+
+=over 1
+
+=item B<url> - a scalar URL to be downloaded.  Mandatory.
+
+=item B<timeout> - a scalar integer number of how many seconds to allow before declaring the attempt a failure and trying a new proxy.  Optional, defaults to 2.
+
+=item B<ua> - An LWP::UserAgent that you'd like to use for the transaction.  Optional.  This sub constructs a default LWP useragent if you don't provide one.
+
+=back
+
+=head3 Returns:
+
+The content of the page located at $url upon success, or undef upon failure (sets an error).
+
+=head3 Example
+
+  my $html = $selector->proxied_get( url => $url, timeout => 5 ) or die $selector->error();
+
+=cut
+
+sub proxied_get {
+  my ( $self, %options ) = @_;
+  $options{timeout} ||= 2;  # Set default timeout
+  my $ua = $options{ua} || LWP::UserAgent->new( timeout => $options{timeout} );
+  $self->error( "Did not provide a URL to proxied_get" ) and return undef unless defined $options{url};
+
+  # Open the cache database
+  tie %h, "BerkeleyDB::Hash", -Filename => $self->{options}{db_file}
+    or $self->error( "Cannot open file $self->{options}{db_file}: $! $BerkeleyDB::Error" ) and return undef;
+  my $response;
+  do {
+    # Select a random proxy from the cache
+    my $proxy;
+    my @proxies = keys( %h );
+    do { $proxy = $proxies[ int( rand( scalar( @proxies ) ) ) ]; } until ( $proxy ne "date" );
+    $self->{selected_proxy} = $proxy;
+    $ua->proxy(['http', 'ftp'], 'http://' . $self->{selected_proxy});
+    $response = $ua->get( $options{url} ); # Download using the proxy
+    delete $h{ $proxy } unless ( $response->is_success() );   # Delete the proxy if it failed to download
+  } until ( $response->is_success() || ( scalar( keys( %h ) ) <= 1 ) );
+  untie %h;
+  if ( $response->is_success() ) {
+    return $response->content();
+  }
+  else {
+    # delete the proxy file to force the next new() call to create a new cache
+    unlink $self->{options}{db_file};
+    $self->error( "All proxies were bad" ) and return undef;
+  }
+}
+
+=head2 error()
+
+If any portion of the module encounters an error, calling this function will return a string describing the last error.  Read-only.  No arguments.
+
+=head3 Example
+
+  my $html = $selector->proxied_get( $url_that_doesnt_exist ) or die $selector->error();
+
+=cut
+
+sub error {
+  my ( $self, $msg ) = @_;
+  if ( !defined($msg) or ! $self->isa(__PACKAGE__) ) {
+    my $error = $self->{error};
+    $self->{error} = undef;
+    return $error;
+  }
+  else {
+    $self->{error} = $msg;
+  }
 }
 
 =head1 PRIVATE FUNCTIONS
@@ -261,7 +364,7 @@ Retrieves the proxy lists, extracts the proxy servers and caches them locally in
 
 =head3 Returns: 
 
-0 upon success, or an error message string upon failure.
+1 upon success, or undef upon failure.
 
 =cut
 
@@ -270,7 +373,7 @@ sub _fetch_proxies {
   tie %h, "BerkeleyDB::Hash",
              -Filename => $self->{options}{db_file},
              -Flags    => DB_CREATE
-    or return "Cannot open file $self->{options}{db_file}: $! $BerkeleyDB::Error\n" ;
+    or self->error("_fetch_proxies: Cannot open file $self->{options}{db_file}: $! $BerkeleyDB::Error") and return undef;
 
   # Fetch the proxy lists
   my $ua = LWP::UserAgent->new;
@@ -286,19 +389,19 @@ sub _fetch_proxies {
   $proxytext =~ s#\n+#\n#gs;
   # Standardize port annotation
   $proxytext =~ s#((?:[\w\-]+\.)+[\w\-]+):?\s+(\d{1,5})\s*#$1:$2\n#gs;
-  my @proxy_list = $proxytext =~ /((?:[\w\-]+\.)+[\w\-]+:\d{1,5})/g; # text or IP addresses of proxy servers
-  return "Couldn't find any proxies\n" unless (@proxy_list);
+  my @proxy_list = $proxytext =~ m#(?:\w+://)?((?:[\w\-]+\.)+[\w\-]+:\d{1,5})#g; # text or IP addresses of proxy servers
+  unless (@proxy_list) { $self->error( "_fetch_proxies: Couldn't find any proxies" ) and return undef; }
   $h{"date"} = ParseDate( "today" );
   foreach my $proxy ( @proxy_list ) { $h{ $proxy } = 1; }
   untie %h;
-  return 0;
+  return 1;
 }
 
 =head1 TODO
 
 =over 2
 
-=item * Code beautification.  1st draft is always rough.
+=item * Need to find better proxylists for the test scripts.  By and large, the free proxylists I found had a bunch of bad proxy servers in them.  This makes my tests look bad because 'garbage in = garbage out.'
 
 =back
 
@@ -345,6 +448,8 @@ L<http://search.cpan.org/dist/HTTP-ProxySelector-Persistent>
 =head1 ACKNOWLEDGEMENTS
 
 This module is a fork from HTTP::ProxySelector v0.02.  HTTP::ProxySelector v0.02 is copyright 2003 Eyal Udassin.
+
+Error method was written by Allen Day and borrowed from Geo::Google.
 
 =head1 COPYRIGHT & LICENSE
 
